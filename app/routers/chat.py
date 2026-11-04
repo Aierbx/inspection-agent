@@ -14,6 +14,7 @@ async def chat(req: AgentRequest, request: Request):
         client=request.app.state.llm_client,
         model_name=request.app.state.model_name,
         messages=[m.model_dump() for m in req.messages],
+        max_steps=request.app.state.max_steps,
     )
     return ChatResponse(reply=reply, steps=steps)
 

@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     API_KEY: str
     BASE_URL: str
     model_name: str = "deepseek-chat"
+    MAX_STEPS: int = 10
 
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / ".env",

@@ -57,4 +57,9 @@ class DetectionResult(BaseModel):
     quality_metrics: Quality_Metrics
     defect_result: list[Defect]
 
-#
+# 工具函数schema
+class Defect_Standard_Data(BaseModel):
+    """
+    定义缺陷查询函数的输入
+    """
+    defect_type: str = Field(description="缺陷类别，例如划痕、气孔以及裂纹等")
