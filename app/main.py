@@ -25,6 +25,6 @@ async def lifespan(app: FastAPI):
     finally:
         await client.close()
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(lifespan=lifespan, debug=True,)
 
 app.include_router(chat_router)
