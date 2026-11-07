@@ -25,8 +25,6 @@ get_or_create_collection()   # 创建或打开 Chroma 持久化 collection
 
 settings = Settings()
 
-from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
-
 embedding_model = None
 
 def get_embedding_model() -> SentenceTransformer:

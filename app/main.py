@@ -3,6 +3,7 @@ from openai import AsyncOpenAI
 
 from app.config import Settings
 from app.routers.chat import router as chat_router
+from app.routers.report import router as report_router
 
 from contextlib import asynccontextmanager
 
@@ -28,3 +29,4 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan, debug=True,)
 
 app.include_router(chat_router)
+app.include_router(report_router)

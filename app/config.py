@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     CATALOG_PATH: Path = DATA_DIR / "catalog.json"
     EMBEDDING_MODEL_NAME: str = "BAAI/bge-small-zh-v1.5"
     EMBEDDING_MODEL_DIR: Path = DATA_DIR / "models"
+    REINSPECTION_CONFIDENCE_THRESHOLD: float = 0.8
 
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / ".env",

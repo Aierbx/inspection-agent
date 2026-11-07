@@ -10,11 +10,12 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 @router.post("", response_model=ChatResponse)
 async def chat(req: AgentRequest, request: Request):
-    reply, steps = await agent_loop(
+    reply, steps, _ = await agent_loop(
         client=request.app.state.llm_client,
         model_name=request.app.state.model_name,
         messages=[m.model_dump() for m in req.messages],
         max_steps=request.app.state.max_steps,
+        mode="chat"
     )
     return ChatResponse(reply=reply, steps=steps)
 

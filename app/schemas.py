@@ -15,6 +15,11 @@ class ChatResponse(BaseModel):
     reply: str
     steps: int    # agent 实际走了几步，便于你观察行为
 
+class GenerateResponse(BaseModel):
+    draft: str
+    citations: list[str]
+
+
 # 检测算法返回的结构化结果
 class Quality_Metrics(BaseModel):
     """

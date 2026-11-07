@@ -130,6 +130,7 @@ async def dispatch_tool(function_name, args):
             tool = TOOL_REGISTRY[function_name]
             arguments = tool["args_model"].model_validate(args)
             res = await TOOL_REGISTRY[function_name]["function"](**arguments.model_dump())
+
         except ValidationError:
             res = {
                 "success": False,
