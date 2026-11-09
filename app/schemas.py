@@ -106,5 +106,6 @@ class Search_Knowledge_Base_Data(BaseModel):
     )
     top_k: int = Field(
         default=5,
-        description="表示当前RAG检索阶段选择最佳的k个chunk，默认为5，不允许修改"
+        ge=1,
+        description="表示当前RAG检索阶段选择最佳的k个chunk，默认 5，服务端最多返回 5 条。"
     )

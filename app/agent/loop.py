@@ -1,9 +1,11 @@
 import json
+import asyncio
 
 from app.prompts import SYSTEM_PROMPT, REPORT_SYSTEM_PROMPT
 from app.agent.tools import get_tool_schema, dispatch_tool, TOOL_REGISTRY
+from app.config import Settings
 
-tools = get_tool_schema()
+settings = Settings()
 
 async def agent_loop(
     client,
@@ -11,7 +13,7 @@ async def agent_loop(
     messages: list[dict],
     max_steps: int,
     mode: str
-) -> tuple[str | None, int]:
+) -> tuple[str | None, int, list[dict]]:
     steps = 1
     retrieved_sources = []
 
@@ -27,6 +29,8 @@ async def agent_loop(
         ]
 
     while True:
+        tools = get_tool_schema()
+
         response = await client.chat.completions.create(
             model=model_name,
             messages=conversation,
@@ -51,7 +55,11 @@ async def agent_loop(
         for tool_call in tool_calls:
             try:
                 arguments = json.loads(tool_call.function.arguments)
-                tool_res = await dispatch_tool(tool_call.function.name, arguments)
+
+                tool_res = await asyncio.wait_for(
+                    dispatch_tool(tool_call.function.name, arguments),
+                    timeout=settings.TOOL_TIMEOUT_SECONDS,  # config 里新增，默认 30
+                )
                 if tool_call.function.name == "search_knowledge_base_tool" and tool_res.get("success"):
                     for chunk in tool_res["top_k_chunks"]:
                         retrieved_sources.append({
@@ -66,6 +74,12 @@ async def agent_loop(
                 tool_res = {
                     "success": False,
                     "error": "invalid_tool_arguments_json",
+                }
+
+            except asyncio.TimeoutError:
+                tool_res = {
+                    "success": False,
+                    "error": "tool_timeout"
                 }
 
             conversation.append(

@@ -3,10 +3,8 @@ import re
 
 from app.schemas import GenerateResponse, DetectionResult
 from app.agent.loop import agent_loop
-from app.config import Settings
 
 CITATION_PATTERN = re.compile(r"\[来源：([^｜\]\r\n]+)｜([^\]\r\n]+)\]")
-settings = Settings()
 
 def validate_report_citations(
     draft: str, retrieved_sources: list[dict]
@@ -40,6 +38,7 @@ router = APIRouter(prefix="/report", tags=["report"])
 
 @router.post("/generate", response_model=GenerateResponse)
 async def generate(req: DetectionResult, request: Request):
+    settings = request.app.state.settings
 
     defects_requiring_reinspection = [
         defect

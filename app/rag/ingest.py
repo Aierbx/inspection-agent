@@ -4,6 +4,7 @@ import json
 from json import JSONDecodeError
 import chromadb
 import re
+import asyncio
 from sentence_transformers import SentenceTransformer
 
 from app.config import Settings, BASE_DIR
@@ -49,9 +50,9 @@ def create_embeddings(texts: list[str]) -> list[list[float]]:
     model = get_embedding_model()
 
     vetors = model.encode(
-        texts,
-        normalize_embeddings=True,
-        convert_to_numpy=True
+            texts,
+            normalize_embeddings=True,
+            convert_to_numpy=True
     )
 
     return vetors.tolist()
@@ -410,7 +411,7 @@ def get_version_status(
         f'不支持的文档类型：{document["document_type"]}'
     )
 
-def build_change_plan(source_files: list[Path], manifest: dict, catalog: dict,) -> dict:
+async def build_change_plan(source_files: list[Path], manifest: dict, catalog: dict,) -> dict:
     """
     定义需要处理的文件
     """
@@ -510,7 +511,7 @@ def save_manifest(manifest: dict) -> None:
             indent=2,
         )
 
-def apply_change_plan(
+async def apply_change_plan(
         change_plan: dict,
         manifest: dict,
         catalog: dict,
@@ -520,7 +521,9 @@ def apply_change_plan(
     """
 
     if change_plan["requires_rebuild"]:
-        collection = reset_collection()
+        collection = await asyncio.to_thread(
+            reset_collection
+        )
 
         # 旧 manifest 中的 chunk_ids 已经无效
         manifest = create_empty_manifest()
@@ -528,7 +531,9 @@ def apply_change_plan(
         files_to_index = change_plan["all_source_files"]
 
     else:
-        collection = get_or_create_collection()
+        collection = await asyncio.to_thread(
+            get_or_create_collection
+        )
 
         files_to_index = (
                 change_plan["new_files"]
@@ -539,17 +544,18 @@ def apply_change_plan(
                 change_plan["changed_files"]
                 + change_plan["deleted_files"]
         )
-        for source_path in files_to_remove:
-            old_record = manifest["documents"][source_path]
+        chunk_ids_to_delete = [
+            chunk_id
+            for source_path in files_to_remove
+            for chunk_id in manifest["documents"][source_path]["chunk_ids"]
+        ]
 
-            if old_record["chunk_ids"]:
-                collection.delete(
-                    ids=old_record["chunk_ids"]
-                )
+        if chunk_ids_to_delete:
+            await asyncio.to_thread(collection.delete, ids=chunk_ids_to_delete)
 
-            # 源文件已经彻底删除，才从 manifest 中移除记录
-            if source_path in change_plan["deleted_files"]:
-                del manifest["documents"][source_path]
+        # 源文件已经彻底删除，才从 manifest 中移除记录
+        for source_path in change_plan["deleted_files"]:
+            del manifest["documents"][source_path]
 
     for source_path in files_to_index:
         file_path = BASE_DIR / source_path
@@ -571,16 +577,23 @@ def apply_change_plan(
         if not cit_eligible:
             continue
 
-        chunks = split_markdown(document)
+        chunks = await asyncio.to_thread(
+            split_markdown,
+            document
+        )
 
         texts = [chunk["content"] for chunk in chunks]
-        embeddings = create_embeddings(texts)
+        embeddings = await asyncio.to_thread(
+            create_embeddings,
+            texts
+        )
         chunk_ids = [
             chunk["chunk_id"]
             for chunk in chunks
         ]
 
-        collection.upsert(
+        await asyncio.to_thread(
+            collection.upsert,
             ids=chunk_ids,
             documents=texts,
             embeddings=embeddings,
@@ -612,7 +625,7 @@ async def sync_knowledge_base(
     manifest = load_manifest()
     catalog = load_catalog()
 
-    change_plan = build_change_plan(scope_files, manifest, catalog)
+    change_plan = await build_change_plan(scope_files, manifest, catalog)
 
     if change_plan["requires_rebuild"]:
         rebuild_reason = "embedding 模型配置已变化"
@@ -641,7 +654,7 @@ async def sync_knowledge_base(
     #         "当前版本暂未实现删除文件对应的向量。"
     #     )
 
-    updated_manifest = apply_change_plan(
+    updated_manifest = await apply_change_plan(
         change_plan,
         manifest,
         catalog,

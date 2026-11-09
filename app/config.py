@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     BASE_URL: str
     model_name: str = "deepseek-chat"
     MAX_STEPS: int = 10
+    TOOL_TIMEOUT_SECONDS: float = 30.0
 
     # 知识库文件路径与文档切块大小限制
     DATA_DIR: Path = BASE_DIR / "data"

@@ -20,6 +20,7 @@ async def lifespan(app: FastAPI):
     app.state.llm_client = client
     app.state.max_steps = settings.MAX_STEPS
     app.state.model_name = settings.model_name
+    app.state.settings = settings
 
     try:
         yield

@@ -1,8 +1,16 @@
+import asyncio
+
 from app.rag.ingest import create_embeddings, get_or_create_collection
 
 
 async def search_knowledge_base(query: str, mode: str, top_k: int = 5):
-    query_embeddings = create_embeddings([query])[0]
+    top_k = min(top_k, 5)
+
+    query_embeddings = await asyncio.to_thread(
+        create_embeddings,
+        [query]
+    )
+    query_embedding = query_embeddings[0]
 
     if mode == "current":
         where = {
@@ -11,10 +19,13 @@ async def search_knowledge_base(query: str, mode: str, top_k: int = 5):
     else:
         where = None
 
-    collection = get_or_create_collection()
+    collection = await asyncio.to_thread(
+        get_or_create_collection
+    )
 
-    result = collection.query(
-        query_embeddings = [query_embeddings],
+    result = await asyncio.to_thread(
+        collection.query,
+        query_embeddings = [query_embedding],
         n_results = top_k,
         where = where,
         include = ["documents", "metadatas", "distances"]
