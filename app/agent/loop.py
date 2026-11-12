@@ -63,6 +63,8 @@ async def agent_loop(
                 if tool_call.function.name == "search_knowledge_base_tool" and tool_res.get("success"):
                     for chunk in tool_res["top_k_chunks"]:
                         retrieved_sources.append({
+                            "chunk_id": chunk["chunk_id"],
+                            "text": chunk["text"],
                             "document_id": chunk["metadata"]["document_id"],
                             "chapter_id": chunk["chapter_id"],
                             "section_id": chunk["section_id"],

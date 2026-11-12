@@ -1,38 +1,66 @@
-from fastapi import APIRouter, Request
 import re
+from collections import Counter
 
-from app.schemas import GenerateResponse, DetectionResult
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import ValidationError
+
 from app.agent.loop import agent_loop
+from app.schemas import (
+    DetectionResult,
+    GenerateResponse,
+    ModelCitation,
+    ReportModelOutput,
+    VerifiedCitation,
+)
 
-CITATION_PATTERN = re.compile(r"\[来源：([^｜\]\r\n]+)｜([^\]\r\n]+)\]")
+CITATION_PATTERN = re.compile(r"\[引用:([^\]\r\n]*)\]")
 
 def validate_report_citations(
-    draft: str, retrieved_sources: list[dict]
-) -> tuple[list[str], list[str]]:
-    """
-    通过正则匹配草稿文档中实际引用的文档
-    """
-    allowed = set()
-    for source in retrieved_sources:
-        section = source["section_id"] or source["chapter_id"]
-        if source["citation_eligible"] and section:
-            allowed.add((source["document_id"].strip(), section.strip()))
+    draft: str, model_citations: list[ModelCitation], retrieved_sources: list[dict]
+) -> tuple[str, list[VerifiedCitation], list[str]]:
+    """核验正文中的引用，返回渲染后的正文、已核验来源和待复核片段 ID。"""
+    sources_by_id = {
+        source["chunk_id"]: source
+        for source in retrieved_sources
+        if source["citation_eligible"]
+    }
+    quotes_by_id = {citation.chunk_id: citation.quote for citation in model_citations}
+    citation_counts = Counter(citation.chunk_id for citation in model_citations)
+    cited_ids = dict.fromkeys(CITATION_PATTERN.findall(draft))
 
-    references = dict.fromkeys(
-        (document_id.strip(), section.strip())
-        for document_id, section in CITATION_PATTERN.findall(draft)
-    )
+    verified: dict[str, VerifiedCitation] = {}
+    unverified = []
+    for chunk_id in cited_ids:
+        source = sources_by_id.get(chunk_id)
+        quote = quotes_by_id.get(chunk_id, "")
+        if (
+            source is None
+            or citation_counts[chunk_id] != 1
+            or not quote.strip()
+            or quote not in source["text"]
+        ):
+            unverified.append(chunk_id or "空片段 ID")
+            continue
 
-    citations = []
-    unverified_citations = []
-    for document_id, section in references:
-        reference = f"{document_id}｜{section}"
-        if (document_id, section) in allowed:
-            citations.append(reference)
-        else:
-            unverified_citations.append(reference)
+        document_id = source["document_id"].strip()
+        section = (source["section_id"] or "").strip() or (source["chapter_id"] or "").strip()
+        if not document_id or not section:
+            unverified.append(chunk_id)
+            continue
+        verified[chunk_id] = VerifiedCitation(
+            chunk_id=chunk_id, quote=quote, doc_id=document_id, section=section
+        )
 
-    return citations, unverified_citations
+    unverified.extend(chunk_id for chunk_id in quotes_by_id if chunk_id not in cited_ids)
+
+    def render_reference(match: re.Match[str]) -> str:
+        reference = verified.get(match[1])
+        if reference is None:
+            return "[引用待复核]"
+        return f"[来源：{reference.doc_id}｜{reference.section}]"
+
+    draft = CITATION_PATTERN.sub(render_reference, draft)
+    return draft, list(verified.values()), unverified
 
 router = APIRouter(prefix="/report", tags=["report"])
 
@@ -52,14 +80,35 @@ async def generate(req: DetectionResult, request: Request):
             "content": req.model_dump_json()
         }
     ]
-    draft, steps, citations = await agent_loop(
-        client=request.app.state.llm_client,
-        model_name=request.app.state.model_name,
-        messages=messages,
-        max_steps=request.app.state.max_steps,
-        mode="report"
+
+    for attempt in range(1, 4):
+        reply, steps, retrieved_sources = await agent_loop(
+            client=request.app.state.llm_client,
+            model_name=request.app.state.model_name,
+            messages=messages,
+            max_steps=request.app.state.max_steps,
+            mode="report"
+        )
+
+        try:
+            model_output = ReportModelOutput.model_validate_json(reply)
+        except ValidationError as exc:
+            if attempt == 3:
+                raise HTTPException(status_code=502, detail="模型返回的报告格式无效") from exc
+
+            messages.append({
+                "role": "user",
+                "content": (
+                    "上一次报告格式校验失败。请根据以下错误重新输出完整 JSON：\n"
+                    f"{exc.errors(include_input=False, include_url=False)}"
+                ),
+            })
+        else:
+            break
+
+    draft, citations, unverified = validate_report_citations(
+        model_output.draft, model_output.citations, retrieved_sources
     )
-    citations, unverified = validate_report_citations(draft, citations)
     if unverified:
         draft += "\n\n**引用待复核**\n\n"
         draft += "\n".join(f"- {source}" for source in unverified)
@@ -78,4 +127,11 @@ async def generate(req: DetectionResult, request: Request):
     elif reinspection_text:
         draft += f"\n\n## 人工复检\n\n{reinspection_text}\n"
 
-    return GenerateResponse(draft=draft, citations=citations)
+    # 文档状态-可用/需要复核
+    status = (
+        "needs_review"
+        if defects_requiring_reinspection or unverified
+        else "draft"
+    )
+
+    return GenerateResponse(draft=draft, citations=citations, status=status)

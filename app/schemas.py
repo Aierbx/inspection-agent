@@ -15,10 +15,22 @@ class ChatResponse(BaseModel):
     reply: str
     steps: int    # agent 实际走了几步，便于你观察行为
 
+class ModelCitation(BaseModel):
+    chunk_id: str
+    quote: str
+
+class VerifiedCitation(ModelCitation):
+    doc_id: str
+    section: str
+
 class GenerateResponse(BaseModel):
     draft: str
-    citations: list[str]
+    citations: list[VerifiedCitation]
+    status: Literal["draft", "needs_review"]
 
+class ReportModelOutput(BaseModel):
+    draft: str
+    citations: list[ModelCitation]
 
 # 检测算法返回的结构化结果
 class Quality_Metrics(BaseModel):
