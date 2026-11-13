@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Request
 from app.schemas import AgentRequest, ChatResponse
-from app.agent.loop import agent_loop
+from app.agent.loop import agent_loop, agent_loop_stream
 from app.llm import chat_stream
 from starlette.responses import StreamingResponse
 
@@ -19,20 +19,41 @@ async def chat(req: AgentRequest, request: Request):
     )
     return ChatResponse(reply=reply, steps=steps)
 
+# @router.post("/stream")
+# async def chat_sse(req: AgentRequest, request: Request):
+#     async def generate():
+#         try:
+#             async for chunk in chat_stream(
+#                         client=request.app.state.llm_client,
+#                         model_name=request.app.state.model_name,
+#                         messages = [m.model_dump() for m in req.messages]
+#                     ):
+#                 yield f"data: {json.dumps({'delta': chunk}, ensure_ascii=False)}\n\n"
+#
+#             yield f"data: [DONE]\n\n"
+#         except Exception as e:
+#             yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+#
+#     return StreamingResponse(
+#         generate(),
+#         media_type="text/event-stream",
+#     )
+
 @router.post("/stream")
 async def chat_sse(req: AgentRequest, request: Request):
     async def generate():
         try:
-            async for chunk in chat_stream(
+            async for event in agent_loop_stream(
                         client=request.app.state.llm_client,
                         model_name=request.app.state.model_name,
-                        messages = [m.model_dump() for m in req.messages]
+                        messages=[m.model_dump() for m in req.messages],
+                        max_steps=request.app.state.max_steps,
+                        mode="all_stream"
                     ):
-                yield f"data: {json.dumps({'delta': chunk}, ensure_ascii=False)}\n\n"
-
-            yield f"data: [DONE]\n\n"
-        except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception:
+            error = {"type": "error", "message": "生成回答时错误"}
+            yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         generate(),
