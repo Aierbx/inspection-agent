@@ -1,3 +1,18 @@
 __pycache__/
 *.pyc
 .env
+
+# 本地知识库产物
+/data/models/
+/data/chroma/
+/data/index_manifest/
+
+# 本地开发环境
+/.venv/
+/.idea/
+/.vscode/
+.pytest_cache/
+
+# 临时文件
+~$*
+*.tmp
