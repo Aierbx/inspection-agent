@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Literal
 from datetime import datetime
 
@@ -28,9 +28,13 @@ class GenerateResponse(BaseModel):
     citations: list[VerifiedCitation]
     status: Literal["draft", "needs_review"]
 
+class DefectJudgment(BaseModel):
+    judgment: Literal["合格", "不合格", "待复核"]
+
 class ReportModelOutput(BaseModel):
     draft: str
     citations: list[ModelCitation]
+    defect_judgments: list[DefectJudgment]
 
 # 检测算法返回的结构化结果
 class Quality_Metrics(BaseModel):
@@ -57,6 +61,12 @@ class Defect(BaseModel):
     min_confidence: float = Field(ge=0.0, le=1.0, description="该类缺陷的最低识别置信度")
     max_confidence: float = Field(ge=0.0, le=1.0, description="该类缺陷的最高识别置信度")
     evidence_refs: list[str] = Field(description="该类缺陷的图像路径")
+
+    @model_validator(mode="after")
+    def validate_confidence_order(self) -> "Defect":
+        if not (self.min_confidence <= self.avg_confidence <= self.max_confidence):
+            raise ValueError("置信度必须满足：最低值 ≤ 平均值 ≤ 最高值")
+        return self
 
 
 class DetectionResult(BaseModel):

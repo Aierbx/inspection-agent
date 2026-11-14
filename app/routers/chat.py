@@ -1,3 +1,5 @@
+from typing import Literal
+
 from fastapi import APIRouter, Request
 from app.schemas import AgentRequest, ChatResponse
 from app.agent.loop import agent_loop, agent_loop_stream
@@ -40,7 +42,9 @@ async def chat(req: AgentRequest, request: Request):
 #     )
 
 @router.post("/stream")
-async def chat_sse(req: AgentRequest, request: Request):
+async def chat_sse(
+    req: AgentRequest, request: Request, strategy: Literal["A", "B"] = "B"
+):
     async def generate():
         try:
             async for event in agent_loop_stream(
@@ -48,7 +52,7 @@ async def chat_sse(req: AgentRequest, request: Request):
                         model_name=request.app.state.model_name,
                         messages=[m.model_dump() for m in req.messages],
                         max_steps=request.app.state.max_steps,
-                        mode="all_stream"
+                        mode="final_stream" if strategy == "A" else "all_stream"
                     ):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception:

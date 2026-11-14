@@ -1,5 +1,6 @@
 import json
 import asyncio
+from time import perf_counter
 
 from app.prompts import SYSTEM_PROMPT, REPORT_SYSTEM_PROMPT
 from app.agent.tools import get_tool_schema, dispatch_tool, TOOL_REGISTRY
@@ -156,6 +157,9 @@ async def agent_loop_stream(
     max_steps: int,
     mode: str
 ):
+    started_at = perf_counter()
+    first_delta_ms = None
+    call_tokens: list[int | None] = []
     steps = 1
     retrieved_sources = []
 
@@ -163,6 +167,29 @@ async def agent_loop_stream(
         {"role": "system", "content": SYSTEM_PROMPT},
         *messages,
     ]
+
+    async def track_stream(response):
+        total_tokens = None
+        async for chunk in response:
+            if chunk.usage is not None:
+                total_tokens = chunk.usage.total_tokens
+            yield chunk
+        call_tokens.append(total_tokens)
+
+    def done_event():
+        return {
+            "type": "done",
+            "steps": steps,
+            "citations": retrieved_sources,
+            "metrics": {
+                "server_ttft_ms": first_delta_ms,
+                "llm_calls": len(call_tokens),
+                "total_tokens": (
+                    None if None in call_tokens
+                    else sum(tokens for tokens in call_tokens if tokens is not None)
+                ),
+            },
+        }
 
     while True:
         yield {"type": "step", "step": steps}
@@ -173,19 +200,22 @@ async def agent_loop_stream(
                 messages=conversation,
                 tools=get_tool_schema(),
                 tool_choice="auto",
-                stream=True
+                stream=True,
+                stream_options={"include_usage": True},
             )
 
             assistant_message = None
 
-            async for event in _parse_stream_response(response):
+            async for event in _parse_stream_response(track_stream(response)):
                 if event["type"] == "tool_calls":
                     assistant_message = event["message"]
                 else:
+                    if first_delta_ms is None:
+                        first_delta_ms = round((perf_counter() - started_at) * 1000, 2)
                     yield event
 
             if assistant_message is None:
-                yield {"type": "done", "steps": steps, "citations": retrieved_sources}
+                yield done_event()
                 return
 
         else:
@@ -197,6 +227,7 @@ async def agent_loop_stream(
                 stream=False
             )
 
+            call_tokens.append(response.usage.total_tokens if response.usage else None)
             message = response.choices[0].message
 
             if not message.tool_calls:
@@ -204,11 +235,15 @@ async def agent_loop_stream(
                     model=model_name,
                     messages=conversation,
                     stream=True,
+                    stream_options={"include_usage": True},
                 )
-                async for event in _parse_stream_response(response):
-                    yield event
+                async for chunk in track_stream(response):
+                    if chunk.choices and (text := chunk.choices[0].delta.content):
+                        if first_delta_ms is None:
+                            first_delta_ms = round((perf_counter() - started_at) * 1000, 2)
+                        yield {"type": "delta", "text": text}
 
-                yield {"type": "done", "steps": steps, "citations": retrieved_sources}
+                yield done_event()
                 return
 
             assistant_message = message.model_dump(exclude_none=True)

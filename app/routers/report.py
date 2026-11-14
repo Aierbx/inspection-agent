@@ -24,9 +24,13 @@ def validate_report_citations(
         for source in retrieved_sources
         if source["citation_eligible"]
     }
-    quotes_by_id = {citation.chunk_id: citation.quote for citation in model_citations}
-    citation_counts = Counter(citation.chunk_id for citation in model_citations)
-    cited_ids = dict.fromkeys(CITATION_PATTERN.findall(draft))
+    quotes_by_id = {
+        citation.chunk_id.strip(): citation.quote for citation in model_citations
+    }
+    citation_counts = Counter(citation.chunk_id.strip() for citation in model_citations)
+    cited_ids = dict.fromkeys(
+        chunk_id.strip() for chunk_id in CITATION_PATTERN.findall(draft)
+    )
 
     verified: dict[str, VerifiedCitation] = {}
     unverified = []
@@ -54,7 +58,7 @@ def validate_report_citations(
     unverified.extend(chunk_id for chunk_id in quotes_by_id if chunk_id not in cited_ids)
 
     def render_reference(match: re.Match[str]) -> str:
-        reference = verified.get(match[1])
+        reference = verified.get(match[1].strip())
         if reference is None:
             return "[引用待复核]"
         return f"[来源：{reference.doc_id}｜{reference.section}]"
@@ -127,10 +131,12 @@ async def generate(req: DetectionResult, request: Request):
     elif reinspection_text:
         draft += f"\n\n## 人工复检\n\n{reinspection_text}\n"
 
-    # 文档状态-可用/需要复核
+    has_pending_judgment = any(
+        item.judgment == "待复核" for item in model_output.defect_judgments
+    )
     status = (
         "needs_review"
-        if defects_requiring_reinspection or unverified
+        if defects_requiring_reinspection or unverified or has_pending_judgment
         else "draft"
     )
 
