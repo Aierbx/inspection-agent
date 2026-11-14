@@ -111,6 +111,7 @@ async def  _parse_stream_response(response):
         delta = chunk.choices[0].delta
         if delta.content:
             text_parts.append(delta.content)
+            yield {"type": "delta", "text": delta.content}
 
         if delta.tool_calls:
             for item in delta.tool_calls or []:
@@ -145,10 +146,6 @@ async def  _parse_stream_response(response):
                 ],
             },
         }
-        return
-
-    for text in text_parts:
-        yield {"type": "delta", "text": text}
 
 async def agent_loop_stream(
     client,
