@@ -14,6 +14,7 @@ class AgentRequest(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     steps: int    # agent 实际走了几步，便于你观察行为
+    session_id: str | None = None
 
 class ModelCitation(BaseModel):
     chunk_id: str
@@ -131,3 +132,4 @@ class Search_Knowledge_Base_Data(BaseModel):
         ge=1,
         description="表示当前RAG检索阶段选择最佳的k个chunk，默认 5，服务端最多返回 5 条。"
     )
+    strategy: Literal["vector", "bm25", "hybrid"] = "hybrid"

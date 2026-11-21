@@ -8,6 +8,7 @@ import asyncio
 from sentence_transformers import SentenceTransformer
 
 from app.config import Settings, BASE_DIR
+from app.rag.bm25_index import BM25Index
 
 """
 sync_knowledge_base()        # 总入口：预览或执行知识库同步
@@ -25,6 +26,8 @@ get_or_create_collection()   # 创建或打开 Chroma 持久化 collection
 """
 
 settings = Settings()
+# v4 indexes historical bodies too; citation eligibility only controls current use.
+INDEX_SCHEMA = 4
 
 embedding_model = None
 
@@ -116,7 +119,7 @@ def create_empty_manifest() -> dict:
     }
     """
     return {
-        "schema": 2,                    # manifest结构的版本
+        "schema": INDEX_SCHEMA,
         "embedding": {
             "provider": None,
             "model_name": None,
@@ -206,6 +209,29 @@ def reset_collection():
     return client.get_or_create_collection(
         name="inspection-knowledge",
     )
+
+def rebuild_bm25_index():
+    collection = get_or_create_collection()
+    result = collection.get(include=["documents", "metadatas"])
+
+    chunks = [
+        {
+            "chunk_id": chunk_id,
+            "text": text,
+            "metadata": metadata,
+        }
+        for chunk_id, text, metadata in zip(
+            result["ids"],
+            result["documents"],
+            result["metadatas"],
+            strict=True,
+        )
+    ]
+
+    index = BM25Index()
+    index.build(chunks)
+    index.save(settings.DATA_DIR / "bm25_index.pkl")
+
 
 def parse_document(file_path: str) -> dict:
     """
@@ -365,6 +391,20 @@ def split_markdown(document: dict) -> list[dict]:
 
     return chunks
 
+def get_manual_family(document: dict, catalog: dict) -> str | None:
+    if document["document_type"] == "standards":
+        manual_ids = {document["document_id"]}
+    else:
+        manual_ids = set(document["cited_ids"])
+
+    families = {
+        family
+        for family, versions in catalog["manual_families"].items()
+        if manual_ids.intersection(versions.values())
+    }
+    return next(iter(families)) if len(families) == 1 else None
+
+
 def is_citation_eligible(document: dict, catalog: dict) -> bool:
     """
     判断document中的引用是否可行
@@ -454,7 +494,9 @@ async def build_change_plan(source_files: list[Path], manifest: dict, catalog: d
                     catalog,
                 )
 
-                if current_eligible != old_record["citation_eligible"]:
+                if get_manual_family(document, catalog) != old_record.get("manual_family"):
+                    changed_files.append(source_path)
+                elif current_eligible != old_record["citation_eligible"]:
                     eligibility_changed_files.append(source_path)
                 else:
                     unchanged_files.append(source_path)
@@ -492,7 +534,7 @@ async def build_change_plan(source_files: list[Path], manifest: dict, catalog: d
         "eligibility_changed_files": eligibility_changed_files,
         "catalog_changed": catalog_changed,
         "embedding_changed": embedding_changed,
-        "requires_rebuild": embedding_changed,
+        "requires_rebuild": embedding_changed or manifest.get("schema") != INDEX_SCHEMA,
     }
 
 def save_manifest(manifest: dict) -> None:
@@ -538,11 +580,13 @@ async def apply_change_plan(
         files_to_index = (
                 change_plan["new_files"]
                 + change_plan["changed_files"]
+                + change_plan["eligibility_changed_files"]
         )
 
         files_to_remove = (
                 change_plan["changed_files"]
                 + change_plan["deleted_files"]
+                + change_plan["eligibility_changed_files"]
         )
         chunk_ids_to_delete = [
             chunk_id
@@ -564,19 +608,21 @@ async def apply_change_plan(
 
         cit_eligible = is_citation_eligible(document, catalog)
         version_status = get_version_status(document, catalog)
+        manual_family = get_manual_family(document, catalog)
+        family_metadata = {"manual_family": manual_family} if manual_family else {}
 
         manifest["documents"][source_path] = {
             "document_id": document["document_id"],
             "document_type": document["document_type"],
             "version_status": version_status,
+            **family_metadata,
             "citation_eligible": cit_eligible,
             "content_sha256": document["content_hash"],
             "chunk_ids": [],
         }
 
-        if not cit_eligible:
-            continue
-
+        # Historical documents remain searchable in history mode. Preserve False
+        # in metadata so current retrieval and report citation validation reject them.
         chunks = await asyncio.to_thread(
             split_markdown,
             document
@@ -604,6 +650,7 @@ async def apply_change_plan(
                     "chapter_id": chunk["chapter_id"],
                     "section_id": chunk["section_id"],
                     "version_status": version_status,
+                    **family_metadata,
                     "citation_eligible": cit_eligible,
                 }
                 for chunk in chunks
@@ -613,6 +660,8 @@ async def apply_change_plan(
         manifest["documents"][source_path]["chunk_ids"] = chunk_ids
 
 
+    manifest["embedding"] = get_embedding_config()
+    manifest["catalog"]["content_sha256"] = calculate_content_hash(settings.CATALOG_PATH)
     return manifest
 
 async def sync_knowledge_base(
@@ -627,13 +676,14 @@ async def sync_knowledge_base(
 
     change_plan = await build_change_plan(scope_files, manifest, catalog)
 
-    if change_plan["requires_rebuild"]:
+    if manifest.get("schema") != INDEX_SCHEMA:
+        rebuild_reason = "索引结构需要升级，补入历史版本正文并保留当前引用资格"
+    elif change_plan["embedding_changed"]:
         rebuild_reason = "embedding 模型配置已变化"
     else:
         rebuild_reason = ""
 
     if mode == "dry_run":
-
 
         return {
             "success": True,
@@ -654,11 +704,16 @@ async def sync_knowledge_base(
     #         "当前版本暂未实现删除文件对应的向量。"
     #     )
 
+    if change_plan["requires_rebuild"] and scope != "all":
+        raise ValueError("索引需要重建，请使用 scope='all' 同步知识库")
+
     updated_manifest = await apply_change_plan(
         change_plan,
         manifest,
         catalog,
     )
+
+    await asyncio.to_thread(rebuild_bm25_index)
 
     save_manifest(updated_manifest)
 

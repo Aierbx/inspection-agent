@@ -1,11 +1,15 @@
 import json
 import asyncio
 from time import perf_counter
+from datetime import datetime, timezone
+from contextlib import aclosing
 
 from app.prompts import SYSTEM_PROMPT, REPORT_SYSTEM_PROMPT
-from app.agent.tools import get_tool_schema, dispatch_tool, TOOL_REGISTRY
+from app.agent.tools import get_tool_schema
 from app.config import Settings
 from app.llm import chat_stream
+from app.chat_tracing import trace_operation
+from app.agent.tracing import execute_tool, record_generation
 
 settings = Settings()
 
@@ -14,7 +18,9 @@ async def agent_loop(
     model_name: str,
     messages: list[dict],
     max_steps: int,
-    mode: str
+    mode: str,
+    output_messages: list[dict] | None = None,
+    langfuse_client=None,
 ) -> tuple[str | None, int, list[dict]]:
     steps = 1
     retrieved_sources = []
@@ -33,12 +39,21 @@ async def agent_loop(
     while True:
         tools = get_tool_schema()
 
-        response = await client.chat.completions.create(
-            model=model_name,
-            messages=conversation,
-            tools=tools,
-            tool_choice="auto",
-        )
+        with trace_operation(
+            langfuse_client, "llm-call", "generation",
+            list(conversation), {"step": steps, "stream": False}, model=model_name,
+        ) as generation:
+            response = await client.chat.completions.create(
+                model=model_name,
+                messages=conversation,
+                tools=tools,
+                tool_choice="auto",
+            )
+            record_generation(
+                generation,
+                response.choices[0].message.model_dump(exclude_none=True),
+                response.usage,
+            )
 
         assistant_message = response.choices[0].message
 
@@ -48,6 +63,8 @@ async def agent_loop(
 
         if not tool_calls:
             reply = assistant_message.content
+            if output_messages is not None:
+                output_messages.extend(conversation[1 + len(messages):])
             break
 
         if steps >= max_steps:
@@ -55,36 +72,20 @@ async def agent_loop(
             break
 
         for tool_call in tool_calls:
-            try:
-                arguments = json.loads(tool_call.function.arguments)
-
-                tool_res = await asyncio.wait_for(
-                    dispatch_tool(tool_call.function.name, arguments),
-                    timeout=settings.TOOL_TIMEOUT_SECONDS,  # config 里新增，默认 30
-                )
-                if tool_call.function.name == "search_knowledge_base_tool" and tool_res.get("success"):
-                    for chunk in tool_res["top_k_chunks"]:
-                        retrieved_sources.append({
-                            "chunk_id": chunk["chunk_id"],
-                            "text": chunk["text"],
-                            "document_id": chunk["metadata"]["document_id"],
-                            "chapter_id": chunk["chapter_id"],
-                            "section_id": chunk["section_id"],
-                            "citation_eligible": chunk["citation_eligible"],
-                        }
-                        )
-
-            except json.JSONDecodeError:
-                tool_res = {
-                    "success": False,
-                    "error": "invalid_tool_arguments_json",
-                }
-
-            except asyncio.TimeoutError:
-                tool_res = {
-                    "success": False,
-                    "error": "tool_timeout"
-                }
+            tool_res = await execute_tool(
+                tool_call.function.name, tool_call.function.arguments,
+                settings.TOOL_TIMEOUT_SECONDS, langfuse_client, steps,
+            )
+            if tool_call.function.name == "search_knowledge_base_tool" and tool_res.get("success"):
+                for chunk in tool_res["top_k_chunks"]:
+                    retrieved_sources.append({
+                        "chunk_id": chunk["chunk_id"],
+                        "text": chunk["text"],
+                        "document_id": chunk["metadata"]["document_id"],
+                        "chapter_id": chunk["chapter_id"],
+                        "section_id": chunk["section_id"],
+                        "citation_eligible": chunk["citation_eligible"],
+                    })
 
             conversation.append(
                 {
@@ -152,7 +153,9 @@ async def agent_loop_stream(
     model_name: str,
     messages: list[dict],
     max_steps: int,
-    mode: str
+    mode: str,
+    output_messages: list[dict] | None = None,
+    langfuse_client=None,
 ):
     started_at = perf_counter()
     first_delta_ms = None
@@ -165,15 +168,30 @@ async def agent_loop_stream(
         *messages,
     ]
 
-    async def track_stream(response):
+    async def track_stream(response, generation):
         total_tokens = None
-        async for chunk in response:
-            if chunk.usage is not None:
-                total_tokens = chunk.usage.total_tokens
-            yield chunk
-        call_tokens.append(total_tokens)
+        first_output = True
+        try:
+            async for chunk in response:
+                if chunk.usage is not None:
+                    total_tokens = chunk.usage.total_tokens
+                    record_generation(generation, usage=chunk.usage)
+                if first_output and chunk.choices:
+                    delta = chunk.choices[0].delta
+                    if delta.content or delta.tool_calls:
+                        first_output = False
+                        if generation is not None:
+                            generation.update(completion_start_time=datetime.now(timezone.utc))
+                yield chunk
+            call_tokens.append(total_tokens)
+        finally:
+            close = getattr(response, "close", None)
+            if close is not None:
+                await close()
 
     def done_event():
+        if output_messages is not None:
+            output_messages.extend(conversation[1 + len(messages):])
         return {
             "type": "done",
             "steps": steps,
@@ -192,54 +210,82 @@ async def agent_loop_stream(
         yield {"type": "step", "step": steps}
 
         if mode == "all_stream":
-            response = await client.chat.completions.create(
-                model=model_name,
-                messages=conversation,
-                tools=get_tool_schema(),
-                tool_choice="auto",
-                stream=True,
-                stream_options={"include_usage": True},
-            )
-
             assistant_message = None
-
-            async for event in _parse_stream_response(track_stream(response)):
-                if event["type"] == "tool_calls":
-                    assistant_message = event["message"]
-                else:
-                    if first_delta_ms is None:
-                        first_delta_ms = round((perf_counter() - started_at) * 1000, 2)
-                    yield event
+            answer_parts = []
+            with trace_operation(
+                langfuse_client, "llm-call", "generation",
+                list(conversation), {"step": steps, "stream": True}, model=model_name,
+            ) as generation:
+                response = await client.chat.completions.create(
+                    model=model_name,
+                    messages=conversation,
+                    tools=get_tool_schema(),
+                    tool_choice="auto",
+                    stream=True,
+                    stream_options={"include_usage": True},
+                )
+                async with aclosing(track_stream(response, generation)) as chunks:
+                    async with aclosing(_parse_stream_response(chunks)) as events:
+                        async for event in events:
+                            if event["type"] == "tool_calls":
+                                assistant_message = event["message"]
+                            else:
+                                answer_parts.append(event["text"])
+                                if first_delta_ms is None:
+                                    first_delta_ms = round((perf_counter() - started_at) * 1000, 2)
+                                yield event
+                record_generation(
+                    generation,
+                    assistant_message or {"role": "assistant", "content": "".join(answer_parts)},
+                )
 
             if assistant_message is None:
+                conversation.append({"role": "assistant", "content": "".join(answer_parts)})
                 yield done_event()
                 return
 
         else:
-            response = await client.chat.completions.create(
-                model=model_name,
-                messages=conversation,
-                tools=get_tool_schema(),
-                tool_choice="auto",
-                stream=False
-            )
-
-            call_tokens.append(response.usage.total_tokens if response.usage else None)
-            message = response.choices[0].message
-
-            if not message.tool_calls:
+            with trace_operation(
+                langfuse_client, "llm-call", "generation",
+                list(conversation), {"step": steps, "stream": False}, model=model_name,
+            ) as generation:
                 response = await client.chat.completions.create(
                     model=model_name,
                     messages=conversation,
-                    stream=True,
-                    stream_options={"include_usage": True},
+                    tools=get_tool_schema(),
+                    tool_choice="auto",
+                    stream=False,
                 )
-                async for chunk in track_stream(response):
-                    if chunk.choices and (text := chunk.choices[0].delta.content):
-                        if first_delta_ms is None:
-                            first_delta_ms = round((perf_counter() - started_at) * 1000, 2)
-                        yield {"type": "delta", "text": text}
+                call_tokens.append(response.usage.total_tokens if response.usage else None)
+                message = response.choices[0].message
+                record_generation(
+                    generation, message.model_dump(exclude_none=True), response.usage
+                )
 
+            if not message.tool_calls:
+                answer_parts = []
+                with trace_operation(
+                    langfuse_client, "llm-call", "generation",
+                    list(conversation), {"step": steps, "stream": True}, model=model_name,
+                ) as generation:
+                    response = await client.chat.completions.create(
+                        model=model_name,
+                        messages=conversation,
+                        stream=True,
+                        stream_options={"include_usage": True},
+                    )
+                    async with aclosing(track_stream(response, generation)) as chunks:
+                        async for chunk in chunks:
+                            if chunk.choices and (text := chunk.choices[0].delta.content):
+                                answer_parts.append(text)
+                                if first_delta_ms is None:
+                                    first_delta_ms = round((perf_counter() - started_at) * 1000, 2)
+                                yield {"type": "delta", "text": text}
+                    record_generation(
+                        generation, {"role": "assistant", "content": "".join(answer_parts)}
+                    )
+
+                conversation.append({"role": "assistant", "content": "".join(answer_parts)})
                 yield done_event()
                 return
 
@@ -253,36 +299,20 @@ async def agent_loop_stream(
         conversation.append(assistant_message)
 
         for tool_call in tool_calls:
-            try:
-                arguments = json.loads(tool_call["function"]["arguments"])
-
-                tool_res = await asyncio.wait_for(
-                    dispatch_tool(tool_call["function"]["name"], arguments),
-                    timeout=settings.TOOL_TIMEOUT_SECONDS,  # config 里新增，默认 30
-                )
-                if tool_call["function"]["name"] == "search_knowledge_base_tool" and tool_res.get("success"):
-                    for chunk in tool_res["top_k_chunks"]:
-                        retrieved_sources.append({
-                            "chunk_id": chunk["chunk_id"],
-                            "text": chunk["text"],
-                            "document_id": chunk["metadata"]["document_id"],
-                            "chapter_id": chunk["chapter_id"],
-                            "section_id": chunk["section_id"],
-                            "citation_eligible": chunk["citation_eligible"],
-                        }
-                        )
-
-            except json.JSONDecodeError:
-                tool_res = {
-                    "success": False,
-                    "error": "invalid_tool_arguments_json",
-                }
-
-            except asyncio.TimeoutError:
-                tool_res = {
-                    "success": False,
-                    "error": "tool_timeout"
-                }
+            tool_res = await execute_tool(
+                tool_call["function"]["name"], tool_call["function"]["arguments"],
+                settings.TOOL_TIMEOUT_SECONDS, langfuse_client, steps,
+            )
+            if tool_call["function"]["name"] == "search_knowledge_base_tool" and tool_res.get("success"):
+                for chunk in tool_res["top_k_chunks"]:
+                    retrieved_sources.append({
+                        "chunk_id": chunk["chunk_id"],
+                        "text": chunk["text"],
+                        "document_id": chunk["metadata"]["document_id"],
+                        "chapter_id": chunk["chapter_id"],
+                        "section_id": chunk["section_id"],
+                        "citation_eligible": chunk["citation_eligible"],
+                    })
 
             conversation.append(
                 {

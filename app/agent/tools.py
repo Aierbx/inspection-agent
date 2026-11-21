@@ -104,9 +104,11 @@ async def sync_knowledge_base_tool(scope: str, mode: str):
     },
     Search_Knowledge_Base_Data
 )
-async def search_knowledge_base_tool(query: str, mode: str, top_k: int = 5):
+async def search_knowledge_base_tool(
+    query: str, mode: str, top_k: int = 5, strategy: str = "hybrid"
+):
 
-    res = await search_knowledge_base(query, mode, top_k)
+    res = await search_knowledge_base(query, mode, top_k, strategy=strategy)
 
     return res
 

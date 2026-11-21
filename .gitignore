@@ -6,6 +6,15 @@ __pycache__/
 /data/models/
 /data/chroma/
 /data/index_manifest/
+/data/bm25_index.pkl
+/data/index_backups/
+
+# 本地历史上下文
+/data/sessions.db
+/data/sessions.db-*
+
+# 提交材料的打包副本（原始文档和评测数据仍正常跟踪）
+/deliverables/
 
 # 本地开发环境
 /.venv/

@@ -1,5 +1,6 @@
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
 
 # 获取项目根目录
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -11,6 +12,16 @@ class Settings(BaseSettings):
     model_name: str = "deepseek-chat"
     MAX_STEPS: int = 10
     TOOL_TIMEOUT_SECONDS: float = 30.0
+
+    # Langfuse 本地观测服务
+    LANGFUSE_BASE_URL: str = "http://localhost:3000"
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = Field(default="", repr=False)
+
+    # 历史会话存储路径
+    SESSION_DB_PATH: Path = BASE_DIR / "data" / "sessions.db"
+    CHAT_HISTORY_MAX_TURNS: int = Field(default=10, ge=0)
+    CHAT_CONTEXT_TOKEN_BUDGET: int = Field(default=12000, gt=0)
 
     # 知识库文件路径与文档切块大小限制
     DATA_DIR: Path = BASE_DIR / "data"

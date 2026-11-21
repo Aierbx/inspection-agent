@@ -6,6 +6,9 @@ pydantic==2.14.2
 pydantic-settings==2.16.2
 chromadb==1.5.9
 sentence-transformers==6.2.0
+jieba==0.42.1
+rank-bm25==0.2.2
+langfuse==5.2.0
 httpx==0.28.1
 requests==2.34.2
 pytest
